@@ -1,0 +1,357 @@
+'==================================================================================
+' Script Name  : check_smartarray.vbs
+' Usage Syntax : cscript.exe //NoLogo //T:10 check_smartarray.vbs [--tooltype <acu/ssa>|--toolpath <path>|-h]
+' Author       : Alex Simenduev, PlanetIT.WS (http://www.planetit.ws)
+' Version      : 1.0.3
+' LastModified : Jan/01/2015 by Gerhard Petrus   (petrusge (at) gmail (dot) com)
+' Description  : Check status of HP Smart Array Controller Series by using hpacucli or hpssacli
+'                The output is compatible with Nagios.
+'                Default Exit code is 3 (STATE_UNKNOWN)
+' Note:
+' This script is based on the BASH shell script taken from HP forum:
+' http://forums12.itrc.hp.com/service/forums/questionanswer.do?threadId=1128853
+' Also make sure you using a latest version of "HP Array Configuration Utility CLI" 
+'
+' License:
+'    1: This script is supplied as-is without any support, I hope it works for you.
+'    2: You free to modify/distribute this script as you wish, but you must have
+'       the folowing line in the script:
+'       Original author Alex Simenduev, PlanetIT.WS (http://www.planetit.ws)
+'    3: I cannot guaranty that this script works in all cases,
+'       please report bugs to shamil.si(at)gmail.com
+'
+' Change Log:
+'    Version 1.0.3:
+'                  [+] Added support for new HP Smart Storage Administrator CLI (hpssacli), which replaces hpacucli
+'					   in Gen8 and Gen9 ProLiant servers.
+'    Version 1.0.2:
+'                  [!] Changed logic for array controllers with no arrays configured on them:
+'                      Do not exit with state=critical (this controllers usually connect to a shared MSA)
+'                  [+] Updated battery status check - hpacucli now prints "Battery/Capacitor Status"
+'                  [+] Added support for separately displaying multiple arrays configured on one controller
+'                  [+] Display RAID 6 (ADG) status
+'    Version 1.0.1:
+'                  [+] Added constant for script version
+'                  [+] Added commandline arguments, use "-h" for usage help
+'                  [*] Other small/minor changes
+'    Version 1.0b:
+'                  [!] Fixed a bug when another instance of ACU is running
+'                      A warning state will be produced in such situation.
+'    Version 0.9b:
+'                  [*] Initial release.
+'==================================================================================
+Option Explicit
+
+' Script version Constant
+Const VERSION = "1.0.3"
+
+' Nagios states Constants
+Const STATE_OK=0
+Const STATE_WARNING=1
+Const STATE_CRITICAL=2
+Const STATE_UNKNOWN=3
+Const STATE_DEPENDENT=4
+
+' Text of the hpacucli.exe error when another instance of ACU/SSA is running.
+Const ANOTHER_INSTANCE_ERROR = "Another instance of ACU/SSA is already running (possibly a service)."
+
+' Text for notifying the user that the hpacucli.exe could not be found
+Const HPACUCLI_NOT_FOUND = "Warning: The HP Array Conifugration Utility CLI could not be found. Use the option [--toolpath] to set the full path to the file."
+' Text for notifying the user that the hpssacli.exe could not be found
+Const HPSSACLI_NOT_FOUND = "Warning: The HP Smart Storage Administrator CLI could not be found. Use the option [--toolpath] to set the full path to the file."
+
+' Constant of arguments used with hpacucli.exe command.
+Const HPACUCLI_ARGS = "ctrl all show config detail"
+
+' Global variables
+Dim gaStates		: gaStates = Array("OK", "WARNING", "CRITICAL", "UNKNOWN", "DEPENDENT")
+Dim giExitStatus	: giExitStatus = STATE_UNKNOWN
+Dim gsUsage			: gsUsage = "Usage: " & Wscript.ScriptName & " [--tooltype <acu/ssa>|--toolpath <path>|-h]"
+Dim gsHpacucliPath	: gsHpacucliPath = "none"
+Dim gsHpacucli		: gsHpacucli = ""
+Dim gsHpssacliPath  : gsHPssacliPath = "none"
+Dim gsHpssacli      : gsHPssacli = ""
+Dim gsToolType      : gsToolType = ""
+' Main excecution region
+Dim StdOut			: Set StdOut = Wscript.Stdout
+
+' If no arguments specified, then start the checking with default options
+If Wscript.Arguments.Count = 0 Then
+		StdOut.WriteLine gsUsage
+
+' If 1 argument was specified and it is "-h" or "--help", then print help message
+ElseIf Wscript.Arguments.Count = 1 Then
+	If Lcase(Wscript.Arguments.Item(0)) = "-h" Or Lcase(Wscript.Arguments.Item(0)) = "--help" Then
+		StdOut.WriteLine "HP Smartarray check plugin for Nagios, version " & VERSION	
+		StdOut.WriteLine "(C) 2008, Alex Simenduev - shamil.si(at)gmail.com" & vbNewLine
+		StdOut.WriteLine gsUsage
+		StdOut.WriteLine vbTab & "-h, --help             print this help message"
+		StdOut.WriteLine vbTab & "--tooltype <acu/ssa>   use acu for HP Array Configuration Utility"
+		StdOut.WriteLine vbTab & "                       use ssa for HP Smart Array Administrator Utility"
+		StdOut.WriteLine vbTab & "                       You must specify the utility to use."
+		StdOut.WriteLine vbTab & "--toolpath <path>      The full path to the utility"
+		StdOut.WriteLine vbTab & "                       Optional if the utility is installed in the"
+		StdOut.WriteLine vbTab & "                       default setup directory, but required if not."
+	Else
+		StdOut.WriteLine gsUsage
+	End If
+
+' If 2 arguments were specified and first is "--tooltype", then set
+' the default tool path as specified by tool type and start the checking
+ElseIf Wscript.Arguments.Count = 2 Then
+	If Lcase(Wscript.Arguments.Item(0)) = "--tooltype" Then
+		gsToolType = Lcase(Wscript.Arguments.Item(1))
+		If gsToolType = "acu" then
+			gsHpacucliPath = "C:\Program Files\Compaq\HPacucli\bin\hpacucli.exe"
+			gsHpacucli = parse_hpacucli(run_hptool(HPACUCLI_ARGS))		
+			Stdout.WriteLine gaStates(giExitStatus) & " - " & gsHpacucli
+		ElseIf gsToolType = "ssa" then
+			gsHpssacliPath = "C:\Program Files\hp\hpssacli\bin\hpssacli.exe"
+			gsHpssacli = parse_hpacucli(run_hptool(HPACUCLI_ARGS))		
+			Stdout.WriteLine gaStates(giExitStatus) & " - " & gsHpssacli
+		Else
+			StdOut.WriteLine gsUsage
+		End If
+	Else
+		StdOut.WriteLine gsUsage
+	End If
+
+' If 4 arguments were specified the first is "--tooltype", and
+' the third is "--toolpath" then set the tooltype from the second
+' argument, the toolpath from the fourth and start the checking
+ElseIf Wscript.Arguments.Count = 4 Then
+	If Lcase(Wscript.Arguments.Item(0)) = "--tooltype" and Lcase(Wscript.Arguments.Item(2)) = "--toolpath" Then
+		gsToolType = Lcase(Wscript.Arguments.Item(1))
+		If gsToolType = "acu" then
+			gsHpacucliPath = Lcase(Wscript.Arguments.Item(3))
+			If Right(gsHpacucliPath, 1) = "\" Then
+				gsHpacucliPath = gsHpacucliPath & "hpacucli.exe"
+			Else
+				gsHpacucliPath = gsHpacucliPath & "\hpacucli.exe"
+			End If
+			gsHpacucli = parse_hpacucli(run_hptool(HPACUCLI_ARGS))		
+			Stdout.WriteLine gaStates(giExitStatus) & " - " & gsHpacucli
+		ElseIf gsToolType = "ssa" then
+			gsHpssacliPath = Lcase(Wscript.Arguments.Item(3))
+			If Right(gsHpssacliPath, 1) = "\" Then
+				gsHpssacliPath = gsHpssacliPath & "hpssacli.exe"
+			Else
+				gsHpssacliPath = gsHpssacliPath & "\hpssacli.exe"
+			End If
+			gsHpssacli = parse_hpacucli(run_hptool(HPACUCLI_ARGS))		
+			Stdout.WriteLine gaStates(giExitStatus) & " - " & gsHpssacli
+		Else
+			StdOut.WriteLine gsUsage
+		End If		
+	Else
+		StdOut.WriteLine gsUsage
+	End If
+' If more then 2 arguments were specified, then print usage
+Else
+		StdOut.WriteLine gsUsage
+End If
+
+Wscript.Quit(giExitStatus)
+
+
+
+' Function Name : run_hptool(pArguments)
+' Return value  : String
+' Description   : Runs the hpacucli.exe or the hpssacli.exe command, and returns it's output.
+Function run_hptool(pArguments) : run_hptool = "" : On Error Resume Next
+	Dim objShell
+	Dim objExec
+	Dim strLine
+	Dim strFullPath
+	Dim objHpacucliFSO
+
+	If gsHpssacliPath = "none" Then
+		strFullPath = gsHpacucliPath
+	ElseIf gsHpacucliPath = "none" Then
+		strFullPath = gsHpssacliPath
+	End If
+	
+	' - check if the file really exists
+	Set objHpacucliFSO = CreateObject("Scripting.FileSystemObject")
+	if (objHpacucliFSO.FileExists(strFullPath)) Then
+		Set objShell = WScript.CreateObject("WScript.Shell")
+		Set objExec = objShell.Exec(strFullPath & " " & pArguments)
+		If Err.Number <> 0 Then
+			run_hptool = "Error (" & Err.Number & "): " & Err.Description
+		Else
+			Do Until objExec.StdOut.AtEndOfStream
+				strLine = objExec.StdOut.ReadLine()
+			
+				If InStr(strLine, ANOTHER_INSTANCE_ERROR) > 0 Then
+					run_hptool = ANOTHER_INSTANCE_ERROR
+					Exit Do
+				Else
+					run_hptool = run_hptool & strLine & vbNewLine
+				End If
+			Loop
+		End If
+	else
+		If gsHpssacliPath = "none" Then
+			run_hptool = HPACUCLI_NOT_FOUND
+		Else
+			run_hptool = HPSSACLI_NOT_FOUND
+		End If
+	end if	
+	
+	set objHpacucliFSO = Nothing
+	Set objExec = Nothing
+	Set objShell = Nothing
+	Set strFullPath = Nothing
+End Function
+
+' Sub Name     : rset_exit_status(pStatus)
+' Description  : Sets global exit status
+Sub set_exit_status(pStatus)
+	If pStatus = "OK" Then
+		If giExitStatus > STATE_CRITICAL Then
+			giExitStatus = STATE_OK
+		End If
+	ElseIf pStatus = "Predictive Failure" Then
+		If giExitStatus <> STATE_CRITICAL Then
+			giExitStatus = STATE_WARNING
+		End If
+	ElseIf pStatus = "Not Configured" then
+		' - do not change status, this option is not configured
+	Else
+		giExitStatus = STATE_CRITICAL
+	End If
+End Sub
+
+' Function Name : unset(pVariables)
+' Return value  : String
+' Description   : This function will unset all specified variables.
+'                 Variables delimeted by space.
+' Note          : This script must run wiht Execute function
+'                 Otherwise this function will not work!
+'
+' Example       : Execute unset("var1 var2")
+Function unset(pVariables) : unset = ""
+	Dim arrVars : arrVars = Split(pVariables, " ")
+	Dim strVar
+	
+	For Each strVar in arrVars
+		unset = unset & strVar & " = """"" & vbNewLine
+	Next
+End Function
+
+' Function Name : parse_hpacucli(pUnparsed)
+' Return value  : String
+' Description   : This is the main logic function that parses 'hpacucli.exe' and 'hpssacli.exe' output.
+' Note          : I've checked this function as mush as possible, 
+'                 but I cannot guaranty that it 100% will work, please report bugs!
+Function parse_hpacucli(pUnparsed) : parse_hpacucli = ""
+	Dim strLine, arrLines : arrLines = Split(pUnparsed, vbNewLine)
+	Dim strLookFor, strOutput, strCtrlName, strCtrlADG, strCtrlBS, strCtrlBC, strCtrlCA, strCtrlCR, strAString, strArrayID, strArrayST, strLString, strLID, strLST, strPString, strPID, strPST
+	Execute unset("strLookFor strOutput strCtrlName strCtrlADG strCtrlBS strCtrlBC strCtrlCA strCtrlCR strAString strArrayID strArrayST strLString strLID strLST strPString strPID strPST")
+	
+	' Check if a returned hpacucli.exe or hpssacli.exe output conating ANOTHER_INSTANCE_ERROR Error.
+	' If it is, then do not continue to parse the output, and exit with WARNING state.
+	If pUnparsed = ANOTHER_INSTANCE_ERROR Then
+		parse_hpacucli = ANOTHER_INSTANCE_ERROR
+		giExitStatus = STATE_WARNING
+		Exit Function
+	ElseIf pUnparsed = HPACUCLI_NOT_FOUND then
+		parse_hpacucli = HPACUCLI_NOT_FOUND & " - Path used:" & gsHpacucliPath
+		giExitStatus = STATE_WARNING
+		Exit Function
+	ElseIf pUnparsed = HPSSACLI_NOT_FOUND then
+		parse_hpacucli = HPSSACLI_NOT_FOUND & " - Path used:" & gsHpssacliPath
+		giExitStatus = STATE_WARNING
+		Exit Function
+	End If
+	
+	For Each strLine in arrLines
+		If strLine <> "" Then
+			If Left(strline, 1) <> " " Then
+				If strCtrlName <> "" Then
+					parse_hpacucli = parse_hpacucli & strCtrlName & " ADG:" & strCtrlADG & " Bat:" & strCtrlBC & "-" & strCtrlBS & "/Cache:" & strCtrlCA & "/Contr:" & strCtrlCR & _
+					strAString & " {Array:" & strArrayID & "-" & strArrayST & " "  & "(" & strLString & "LD " & strLID & ": " & strLST & " [" & Trim(strPString) & "]" & ")}"
+					Execute unset("strCtrlName strCtrlADG strCtrlBS strCtrlBC strCtrlCA strCtrlCR strAString strArrayID strArrayST strLString strLID strLST strPString strPID strPST")
+				End If
+				strLookFor = "controller"
+				strCtrlName = strLine
+				strCtrlBS = "-"
+				strCtrlCA = "-"
+				strCtrlCR = "-"
+			End If
+
+			' Trim Spaces
+			strLine = Trim(strLine)
+			
+			' Find a Controller states
+			If Lcase(strLookFor) = "controller" Then
+				Select Case Left(strLine, Instr(strLine, ": "))
+					Case "RAID 6 (ADG) Status:"
+						strCtrlADG = Trim(Right(strLine, Len(strLine) - Instr(strLine, ": ")))
+						' - do not call set_exit_status, this value is only informational
+
+					Case "Battery/Capacitor Status:"
+						strCtrlBS = Trim(Right(strLine, Len(strLine) - Instr(strLine, ": ")))
+						call set_exit_status(strCtrlBS)
+
+					Case "Battery/Capacitor Count:"
+						strCtrlBC = Trim(Right(strLine, Len(strLine) - Instr(strLine, ": ")))
+						' - do not call set_exit_status, this value is only informational
+
+					Case "Cache Status:"
+						strCtrlCA = Trim(Right(strLine, Len(strLine) - Instr(strLine, ": ")))
+						call set_exit_status(strCtrlCA)
+						
+					Case "Controller Status:"
+						strCtrlCR = Trim(Right(strLine, Len(strLine) - Instr(strLine, ": ")))
+						call set_exit_status(strCtrlCR)
+				End Select
+			End If
+			
+			' Find a Logical Drive
+			If Left(strLine, Instr(strLine, ": ")) = "Array:" Then
+				If strArrayID <> "" Then
+					strAString = strAString & " {Array:" & strArrayID & "-" & strArrayST & " "  & " (" & strLString & "LD " & strLID & ": " & strLST & " [" & Trim(strPString) & "])}, "
+					Execute unset("strLString strLID strLST strPString strPID strPST")
+				End If
+				strLookFor = "array"
+				strArrayID = Trim(Right(strLine, Len(strLine) - Instr(strLine, ": ")))
+			End If
+				
+			If Lcase(strLookFor) = "array" And  Left(strLine, Instr(strLine, ": ")) = "Status:" Then
+				strArrayST = Trim(Right(strLine, Len(strLine) - Instr(strLine, ": ")))
+				call set_exit_status(strArrayST)
+			End If
+
+			If Left(strLine, Instr(strLine, ": ")) = "Logical Drive:" Then
+				If strLID <> "" Then
+					strLString = strLString & "LD " & strLID & ": " & strLST & " [" & Trim(strPString) & "], "
+					Execute unset("strLID strLST strPString strPID strPST")
+				End if
+				strLookFor = "logdrive"
+				strLID = Trim(Right(strLine, Len(strLine) - Instr(strLine, ": ")))
+			End If
+			
+			If Lcase(strLookFor) = "logdrive" And  Left(strLine, Instr(strLine, ": ")) = "Status:" Then
+				strLST = Trim(Right(strLine, Len(strLine) - Instr(strLine, ": ")))
+				call set_exit_status(strLST)
+			End If
+			
+			' Find a Physical Drive
+			If Instr(strLine, "physicaldrive") > 0 Then
+				strLookFor = "phydrive"
+				strPID = Trim(Right(strLine, Len(strLine) - Len("physicaldrive")))
+			End If
+			
+			If Lcase(strLookFor) = "phydrive" And  Left(strLine, Instr(strLine, ": ")) = "Status:" Then
+				strPST = Trim(Right(strLine, Len(strLine) - Instr(strLine, ": ")))
+				call set_exit_status(strPST)
+				strPString = strPString & "(" & strPID & " " & strPST & ") "
+				Execute unset("strPID strPST")
+			End If				
+		End If
+	Next
+	
+	parse_hpacucli = parse_hpacucli & strCtrlName & " ADG:" & strCtrlADG & " Bat:" & strCtrlBC & "-" & strCtrlBS & "/Cache:" & strCtrlCA & "/Contr:" & strCtrlCR & _
+					strAString & " {Array:" & strArrayID & "-" & strArrayST & " "  & "(" & strLString & "LD " & strLID & ": " & strLST & " [" & Trim(strPString) & "]" & ")}"
+End Function
